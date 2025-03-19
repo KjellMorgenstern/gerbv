@@ -1,4 +1,4 @@
-2025-03-19   Claude Code * noreply AT anthropic dot com *
+2025-03-19   Kjell with Claude Code * noreply AT anthropic dot com *
 
 	* src/draw.c: Fix rendering of pick and place files when multiple
 	components have the same designator. Only process label-holder nets 

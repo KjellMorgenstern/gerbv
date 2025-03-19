@@ -964,7 +964,7 @@ draw_image_to_cairo_target(
 
             if (draw_calc_pnp_mark_coords(net, &mark_x, &mark_y)) {
                 /* Check if this is the same component as the last one we processed */
-                const double position_threshold = 0.05; // Threshold for considering positions different
+                const double position_threshold = 0.0001; // Threshold for considering positions different
                 const double dx = fabs(comp_x - pnp_last_comp_x);
                 const double dy = fabs(comp_y - pnp_last_comp_y);
                 
