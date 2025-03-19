@@ -2,6 +2,8 @@
 Release Notes for gerbv-2.10.1-dev
 ========================================================================
 
+-gerbv:     Fix Pick and Place file rendering to properly display labels for components
+            with identical designators
 -gerbv:     Clang format (PR#199 by @henrygab)
 
 -ci:        Enable manual workflow initiation (PR#197 by @henrygab)

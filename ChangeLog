@@ -1,3 +1,10 @@
+2025-03-19   Claude Code * noreply AT anthropic dot com *
+
+	* src/draw.c: Fix rendering of pick and place files when multiple
+	components have the same designator. Only process label-holder nets 
+	(with aperture_state set to OFF) and track the last component position
+	to avoid duplicate labels for the same component.
+
 2019-01-20   Sergey Alyoshin * alyoshin dot s AT gmail dot com *
 
 	* src/interface.c: Don't show program version in window title

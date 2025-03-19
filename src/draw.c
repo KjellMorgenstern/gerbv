@@ -862,7 +862,12 @@ draw_image_to_cairo_target(
     oldLayer = image->layers;
     oldState = image->states;
 
-    const char* pnp_net_label_str_prev = NULL;
+    /* Use this to track the last component position so we don't draw multiple
+     * labels for the same component while still drawing labels for all components
+     * even those with the same designator.
+     */
+    double pnp_last_comp_x = -999999.0;
+    double pnp_last_comp_y = -999999.0;
 
     for (net = image->netlist->next; net != NULL; net = gerbv_image_return_next_renderable_object(net)) {
 
@@ -950,23 +955,34 @@ draw_image_to_cairo_target(
         if (drawMode != DRAW_SELECTIONS && net->label
             && (image->layertype == GERBV_LAYERTYPE_PICKANDPLACE_TOP
                 || image->layertype == GERBV_LAYERTYPE_PICKANDPLACE_BOT)
-            && g_strcmp0(net->label->str, pnp_net_label_str_prev)) {
+            && net->aperture_state == GERBV_APERTURE_STATE_OFF) { /* Only process the first net for each component */
 
             double mark_x, mark_y;
-
-            /* Add PNP text label only one time per
-             * net and if it is not selected. */
-            pnp_net_label_str_prev = net->label->str;
+            /* Get the component's center position */
+            double comp_x = net->start_x;
+            double comp_y = net->start_y;
 
             if (draw_calc_pnp_mark_coords(net, &mark_x, &mark_y)) {
-                cairo_save(cairoTarget);
+                /* Check if this is the same component as the last one we processed */
+                const double position_threshold = 0.05; // Threshold for considering positions different
+                const double dx = fabs(comp_x - pnp_last_comp_x);
+                const double dy = fabs(comp_y - pnp_last_comp_y);
+                
+                if (dx > position_threshold || dy > position_threshold) {
+                    /* This is a new component position, so draw its label */
+                    cairo_save(cairoTarget);
 
-                cairo_set_font_size(cairoTarget, 0.05);
-                cairo_move_to(cairoTarget, mark_x, mark_y);
-                cairo_scale(cairoTarget, pnp_label_scale_x, pnp_label_scale_y);
-                cairo_show_text(cairoTarget, net->label->str);
+                    cairo_set_font_size(cairoTarget, 0.05);
+                    cairo_move_to(cairoTarget, mark_x, mark_y);
+                    cairo_scale(cairoTarget, pnp_label_scale_x, pnp_label_scale_y);
+                    cairo_show_text(cairoTarget, net->label->str);
 
-                cairo_restore(cairoTarget);
+                    cairo_restore(cairoTarget);
+                    
+                    /* Remember this component position */
+                    pnp_last_comp_x = comp_x;
+                    pnp_last_comp_y = comp_y;
+                }
             }
         }
 
