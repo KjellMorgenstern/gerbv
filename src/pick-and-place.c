@@ -37,11 +37,43 @@
 #include "csv.h"
 #include "pick-and-place.h"
 
+/**
+ * Removes quotation marks from a string.
+ * 
+ * @param str The string to process (will be modified in-place)
+ * @return Pointer to the original string
+ */
+static char* 
+pnp_remove_quotes(char* str) {
+    if (!str) return str;
+    
+    char* p = str;
+    char* q = str;
+    
+    while (*p) {
+        if (*p != '"') {
+            *q++ = *p;
+        }
+        p++;
+    }
+    *q = '\0';
+    
+    return str;
+}
+
 static gerbv_net_t* pnp_new_net(gerbv_net_t* net);
 static void         pnp_reset_bbox(gerbv_net_t* net);
 static void         pnp_init_net(
             gerbv_net_t* net, gerbv_image_t* image, const char* label, gerbv_aperture_state_t apert_state,
             gerbv_interpolation_t interpol
+        );
+static int          custom_parse_comma_header(
+            char* input, char* result_buffer, char* fields[], int max_fields
+        );
+static gboolean     pnp_parse_header_line(
+            char* buf, char* buf0, int* designator_col, int* footprint_col, int* mid_x_col, int* mid_y_col,
+            int* ref_x_col, int* ref_y_col, int* pad_x_col, int* pad_y_col, int* layer_col, int* rotation_col,
+            int* comment_col, char* delimiter
         );
 
 void
@@ -217,15 +249,25 @@ pick_and_place_parse_file(gerb_file_t* fd) {
     int   ret;
     char* row[12];
     char  buf[MAXL + 2], buf0[MAXL + 2];
-    char  def_unit[41] = {
-         0,
-    };
-    double          tmp_x, tmp_y;
+    char  def_unit[41] = {0};
+    double          tmp_x = 0.05, tmp_y = 0.05; /* Default to reasonable values (~100mil total) */
     gerbv_transf_t* tr_rot            = gerb_transf_new();
     GArray*         pnpParseDataArray = g_array_new(FALSE, FALSE, sizeof(PnpPartData));
     gboolean        foundValidDataRow = FALSE;
-    /* Unit declaration for "PcbXY Version 1.0" files as exported by pcb */
-    const char* def_unit_prefix = "# X,Y in ";
+    const char*     def_unit_prefix = "# X,Y in ";
+
+    /* Column indices - default values if header parsing fails */
+    int designator_col = 0;
+    int footprint_col = 1;
+    int mid_x_col = 2;
+    int mid_y_col = 3;
+    int ref_x_col = 4;
+    int ref_y_col = 5;
+    int pad_x_col = 6;
+    int pad_y_col = 7;
+    int layer_col = 8;
+    int rotation_col = 9;
+    int comment_col = 10;
 
     /*
      * many locales redefine "." as "," and so on, so sscanf has problems when
@@ -233,176 +275,357 @@ pick_and_place_parse_file(gerb_file_t* fd) {
      */
     setlocale(LC_NUMERIC, "C");
 
+    /* Default to comma as delimiter, but we'll detect it */
+    char delimiter = '\0';
+
+    /* Clear buf and buf0 to avoid any garbage data */
+    memset(buf, 0, MAXL + 2);
+    memset(buf0, 0, MAXL + 2);
+
+    /* Main processing loop */
     while (fgets(buf, MAXL, fd->fd) != NULL) {
-        int len      = strlen(buf) - 1;
+        int len = strlen(buf) - 1;
         int i_length = 0, i_width = 0;
 
-        lineCounter += 1; /*next line*/
-        if (lineCounter < 2) {
-            /*
-             * TODO in principle column names could be read and interpreted
-             * but we skip the first line with names of columns for this time
-             */
-            continue;
-        }
-        if (len >= 0 && buf[len] == '\n') {
-            buf[len--] = 0;
-        }
-        if (len >= 0 && buf[len] == '\r') {
-            buf[len--] = 0;
-        }
+        lineCounter += 1; /* next line */
+
+        /* Trim trailing newlines */
+        if (len >= 0 && buf[len] == '\n') buf[len--] = 0;
+        if (len >= 0 && buf[len] == '\r') buf[len--] = 0;
+
+        /* Check for unit declaration lines */
         if (0 == strncmp(buf, def_unit_prefix, strlen(def_unit_prefix))) {
             sscanf(&buf[strlen(def_unit_prefix)], "%40s.", def_unit);
-        }
-        if (len <= 11) {  // lets check a minimum length of 11
+            printf("Debug: Detected unit declaration: %s\n", def_unit);
+            continue;
+        } else if (strstr(buf, "X,Y in mils") || strstr(buf, "X, Y in mils")) {
+            strcpy(def_unit, "mil");
+            printf("Debug: Detected 'mils' as the unit\n");
+            continue;
+        } else if (strstr(buf, "X,Y in mm") || strstr(buf, "X, Y in mm")) {
+            strcpy(def_unit, "mm");
+            printf("Debug: Detected 'mm' as the unit\n");
             continue;
         }
 
-        if ((len > 0) && (buf[0] == '%')) {
-            continue;
-        }
+        /* Skip empty or short lines */
+        if (len <= 5) continue;
 
-        /* Abort if we see a G54 */
-        if ((len > 4) && (strncmp(buf, "G54 ", 4) == 0)) {
+        /* Skip special commands that indicate this is not a PnP file */
+        if ((buf[0] == '%') || 
+            (strncmp(buf, "G54 ", 4) == 0) || 
+            (strncmp(buf, "G04 ", 4) == 0)) {
             g_array_free(pnpParseDataArray, TRUE);
             return NULL;
         }
 
-        /* abort if we see a G04 code */
-        if ((len > 4) && (strncmp(buf, "G04 ", 4) == 0)) {
-            g_array_free(pnpParseDataArray, TRUE);
-            return NULL;
+        /* Try to detect and parse header lines */
+        if (pnp_check_and_parse_header(buf, lineCounter, buf0, &designator_col, &footprint_col, 
+                                      &mid_x_col, &mid_y_col, &ref_x_col, &ref_y_col, 
+                                      &pad_x_col, &pad_y_col, &layer_col, &rotation_col, 
+                                      &comment_col, &delimiter, &foundValidDataRow)) {
+            /* Successfully parsed a header - continue to next line */
+            continue;
         }
 
-        /* this accepts file both with and without quotes */
-        /* 	if (!pnp_state) { /\* we are in first line *\/ */
-        /* 	   if ((delimiter = pnp_screen_for_delimiter(buf, 8)) < 0) { */
-        /* 	   continue; */
-        /* 	   } */
-        /* 	} */
+        /* Skip comment lines */
+        if ((buf[0] == '#' || buf[0] == '*')) {
+            /* Count these as valid lines so they don't affect our valid percentage */
+            parsedLines += 1;
+            continue;
+        }
 
-        ret = csv_row_parse(buf, MAXL, buf0, MAXL, row, 11, ',', CSV_QUOTES);
+        if(!foundValidDataRow) {
+            continue;
+        }
 
-        if (ret > 0) {
-            foundValidDataRow = TRUE;
+        /* Parse data row */
+        memset(row, 0, sizeof(char*) * 12);
+        memset(buf0, 0, MAXL + 2);
+
+        /* Use appropriate parser based on delimiter */
+        if (delimiter == ',') {
+            ret = custom_parse_comma_header(buf, buf0, row, 11);
         } else {
+            ret = csv_row_parse(buf, MAXL, buf0, MAXL, row, 11, (int)delimiter, CSV_QUOTES);
+            if (ret <= 0) {
+                ret = custom_parse_comma_header(buf, buf0, row, 11);
+            }
+        }
+
+        if (ret <= 0) {
+            printf("Debug: Failed to parse row: %s\n", buf);
             continue;
         }
-        /* 	printf("direct:%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,  %s, ret %d\n", row[0], row[1], row[2],row[3],
-         * row[4], row[5], row[6], row[7], row[8], row[9], row[10], ret);        */
-        /* 	g_warning ("FFF %s %s\n",row[8],row[6]); */
 
-        if (row[0] && row[8]) {  // here could be some better check for the syntax
-            snprintf(pnpPartData.designator, sizeof(pnpPartData.designator) - 1, "%s", row[0]);
-            snprintf(pnpPartData.footprint, sizeof(pnpPartData.footprint) - 1, "%s", row[1]);
-            snprintf(pnpPartData.layer, sizeof(pnpPartData.layer) - 1, "%s", row[8]);
-            if (row[10] != NULL) {
-                if (!g_utf8_validate(row[10], -1, NULL)) {
-                    gchar* str = g_convert(row[10], strlen(row[10]), "UTF-8", "ISO-8859-1", NULL, NULL, NULL);
-                    // I have not decided yet whether it is better to use always
-                    // "ISO-8859-1" or current locale.
-                    // str = g_locale_to_utf8(row[10], -1, NULL, NULL, NULL);
-                    snprintf(pnpPartData.comment, sizeof(pnpPartData.comment) - 1, "%s", str);
-                    g_free(str);
-                } else {
-                    snprintf(pnpPartData.comment, sizeof(pnpPartData.comment) - 1, "%s", row[10]);
-                }
-            }
-            /*
-              gchar* g_convert(const gchar *str, gssize len, const gchar *to_codeset, const gchar *from_codeset, gsize
-              *bytes_read, gsize *bytes_written, GError **error);
-            */
-            pnpPartData.mid_x = pick_and_place_get_float_unit(row[2], def_unit);
-            pnpPartData.mid_y = pick_and_place_get_float_unit(row[3], def_unit);
-            pnpPartData.ref_x = pick_and_place_get_float_unit(row[4], def_unit);
-            pnpPartData.ref_y = pick_and_place_get_float_unit(row[5], def_unit);
-            pnpPartData.pad_x = pick_and_place_get_float_unit(row[6], def_unit);
-            pnpPartData.pad_y = pick_and_place_get_float_unit(row[7], def_unit);
-            /* This line causes segfault if we accidently starts parsing
-             * a gerber file. It is crap crap crap */
-            if (row[9]) {
-                const int rc = sscanf(row[9], "%lf", &pnpPartData.rotation);  // no units, always deg
-
-                /* CVE-2021-40403
-                 */
-                if (1 != rc) {
-                    g_array_free(pnpParseDataArray, TRUE);
-                    return NULL;
-                }
-            }
-            gerb_transf_reset(tr_rot);
-            gerb_transf_rotate(tr_rot, -DEG2RAD(pnpPartData.rotation)); /* rotate it back to get dimensions */
-            gerb_transf_apply(
-                pnpPartData.pad_x - pnpPartData.mid_x, pnpPartData.pad_y - pnpPartData.mid_y, tr_rot, &tmp_x, &tmp_y
-            );
+        /* Skip description rows that might follow headers */
+        if (strstr(buf, "Description:") || strstr(buf, "File generated")) {
+            printf("Debug: Skipping description/info row\n");
+            continue;
         }
-        /* for now, default back to PCB program format
-         * TODO: implement better checking for format
-         */
-        else if (row[0] && row[1] && row[2] && row[3] && row[4] && row[5] && row[6]) {
-            snprintf(pnpPartData.designator, sizeof(pnpPartData.designator) - 1, "%s", row[0]);
-            snprintf(pnpPartData.footprint, sizeof(pnpPartData.footprint) - 1, "%s", row[1]);
-            snprintf(pnpPartData.layer, sizeof(pnpPartData.layer) - 1, "%s", row[6]);
-            pnpPartData.mid_x = pick_and_place_get_float_unit(row[3], def_unit);
-            pnpPartData.mid_y = pick_and_place_get_float_unit(row[4], def_unit);
-            pnpPartData.pad_x = pnpPartData.mid_x + 0.03;
-            pnpPartData.pad_y = pnpPartData.mid_y + 0.03;
-            tmp_x = 0.03;
-            tmp_y = 0.03;
 
-            /* check for coordinate sanity, and abort if it fails
-             * Note: this is mainly to catch comment lines that get parsed
-             */
+        /* Debug output to show what we parsed */
+        for (int i = 0; i < ret && i < 11; i++) {
+            if (row[i] != NULL) {
+                printf("Debug: Data[%d] = '%s'\n", i, row[i]);
+            }
+        }
+
+        /* Process data based on identified column structure */
+        if (ret >= 3) {
+            /* Parse designator */
+            if (designator_col < ret && row[designator_col] != NULL) {
+                snprintf(pnpPartData.designator, sizeof(pnpPartData.designator) - 1, "%s", row[designator_col]);
+            } else if (ret > 0 && row[0] != NULL) {
+                /* Fallback to first column if designator column is invalid */
+                snprintf(pnpPartData.designator, sizeof(pnpPartData.designator) - 1, "%s", row[0]);
+            } else {
+                continue; /* Skip rows without a designator */
+            }
+
+            /* Parse footprint if available */
+            if (footprint_col < ret && row[footprint_col] != NULL) {
+                snprintf(pnpPartData.footprint, sizeof(pnpPartData.footprint) - 1, "%s", row[footprint_col]);
+            } else {
+                pnpPartData.footprint[0] = '\0';
+            }
+
+            /* Parse layer */
+            if (layer_col < ret && row[layer_col] != NULL) {
+                snprintf(pnpPartData.layer, sizeof(pnpPartData.layer) - 1, "%s", row[layer_col]);
+            } else {
+                strcpy(pnpPartData.layer, "TOP"); /* Default to TOP */
+            }
+
+            /* Parse comment if available */
+            if (comment_col < ret && row[comment_col] != NULL) {
+                if (!g_utf8_validate(row[comment_col], -1, NULL)) {
+                    gchar* str = g_convert(row[comment_col], strlen(row[comment_col]), 
+                                          "UTF-8", "ISO-8859-1", NULL, NULL, NULL);
+                    if (str != NULL) {
+                        snprintf(pnpPartData.comment, sizeof(pnpPartData.comment) - 1, "%s", str);
+                        g_free(str);
+                    } else {
+                        pnpPartData.comment[0] = '\0';
+                    }
+                } else {
+                    snprintf(pnpPartData.comment, sizeof(pnpPartData.comment) - 1, "%s", row[comment_col]);
+                }
+            } else {
+                pnpPartData.comment[0] = '\0';
+            }
+
+            /* Parse X coordinate */
+            if (mid_x_col < ret && row[mid_x_col] != NULL) {
+                /* Clean up the X coordinate - handle quoted values */
+                char x_str[50] = {0};
+                strncpy(x_str, row[mid_x_col], sizeof(x_str)-1);
+
+                /* Remove any quotes */
+                pnp_remove_quotes(x_str);
+
+                /* Parse X coordinate */
+                pnpPartData.mid_x = pick_and_place_get_float_unit(x_str, def_unit);
+            } else {
+                pnpPartData.mid_x = 0.0;
+            }
+
+            /* Parse Y coordinate */
+            if (mid_y_col < ret && row[mid_y_col] != NULL) {
+                /* Clean up the Y coordinate - handle quoted values */
+                char y_str[50] = {0};
+                strncpy(y_str, row[mid_y_col], sizeof(y_str)-1);
+
+                /* Remove any quotes */
+                pnp_remove_quotes(y_str);
+
+                /* Parse Y coordinate */
+                pnpPartData.mid_y = pick_and_place_get_float_unit(y_str, def_unit);
+            } else {
+                pnpPartData.mid_y = 0.0;
+            }
+
+            /* Skip if coordinates are at origin (likely a header row) */
             if ((fabs(pnpPartData.mid_x) < 0.001) && (fabs(pnpPartData.mid_y) < 0.001)) {
                 continue;
             }
 
-            /* CVE-2021-40403
-             */
-            const int rc = sscanf(row[5], "%lf", &pnpPartData.rotation);  // no units, always deg
-            if (1 != rc) {
-                g_array_free(pnpParseDataArray, TRUE);
-                return NULL;
+            /* Parse reference points if available */
+            if (ref_x_col < ret && row[ref_x_col] != NULL) {
+                pnpPartData.ref_x = pick_and_place_get_float_unit(row[ref_x_col], def_unit);
+            } else {
+                pnpPartData.ref_x = pnpPartData.mid_x;
             }
+
+            if (ref_y_col < ret && row[ref_y_col] != NULL) {
+                pnpPartData.ref_y = pick_and_place_get_float_unit(row[ref_y_col], def_unit);
+            } else {
+                pnpPartData.ref_y = pnpPartData.mid_y;
+            }
+
+            /* Parse pad positions if available */
+            if (pad_x_col < ret && row[pad_x_col] != NULL) {
+                pnpPartData.pad_x = pick_and_place_get_float_unit(row[pad_x_col], def_unit);
+            } else {
+                pnpPartData.pad_x = pnpPartData.mid_x + 0.03;
+            }
+
+            if (pad_y_col < ret && row[pad_y_col] != NULL) {
+                pnpPartData.pad_y = pick_and_place_get_float_unit(row[pad_y_col], def_unit);
+            } else {
+                pnpPartData.pad_y = pnpPartData.mid_y + 0.03;
+            }
+
+            /* Normalize layer name */
+            if (strcasecmp(pnpPartData.layer, "top") == 0 || 
+                strcasecmp(pnpPartData.layer, "t") == 0 ||
+                strcasecmp(pnpPartData.layer, "1") == 0) {
+                strcpy(pnpPartData.layer, "TOP");
+            } else if (strcasecmp(pnpPartData.layer, "bottom") == 0 || 
+                       strcasecmp(pnpPartData.layer, "bot") == 0 || 
+                       strcasecmp(pnpPartData.layer, "b") == 0 ||
+                       strcasecmp(pnpPartData.layer, "2") == 0) {
+                strcpy(pnpPartData.layer, "BOTTOM");
+            } else if (strcasecmp(pnpPartData.layer, "top/bottom") == 0 ||
+                       strcasecmp(pnpPartData.layer, "both") == 0) {
+                strcpy(pnpPartData.layer, "TOP");
+            }
+
+            /* Parse rotation */
+            pnpPartData.rotation = 0.0;
+            if (rotation_col < ret && row[rotation_col] != NULL) {
+                char rotation_str[50] = {0};
+                strncpy(rotation_str, row[rotation_col], sizeof(rotation_str)-1);
+
+                /* Remove any quotes */
+                pnp_remove_quotes(rotation_str);
+
+                /* Try to parse rotation */
+                if (1 != sscanf(rotation_str, "%lf", &pnpPartData.rotation)) {
+                    pnpPartData.rotation = 0.0;
+                }
+            }
+
+            /* Calculate rotation for package dimensions */
+            gerb_transf_reset(tr_rot);
+            gerb_transf_rotate(tr_rot, -DEG2RAD(pnpPartData.rotation));
+            gerb_transf_apply(
+                pnpPartData.pad_x - pnpPartData.mid_x, 
+                pnpPartData.pad_y - pnpPartData.mid_y, 
+                tr_rot, &tmp_x, &tmp_y
+            );
         } else {
-            continue;
+            printf("Debug: Skipping row with fewer than 3 columns\n");
+            continue; /* Skip rows with too few columns */
         }
 
-        /*
-         * now, try and figure out the actual footprint shape to draw, or just
-         * guess something reasonable
-         */
-        if (sscanf(pnpPartData.footprint, "%02d%02d", &i_length, &i_width) == 2) {
-            // parse footprints like 0805 or 1206
+        /* Parse footprint shape */
+        if (strstr(pnpPartData.footprint, "SMD") != NULL &&
+            (sscanf(pnpPartData.footprint, "%02d%02d", &i_length, &i_width) == 2 ||
+             sscanf(pnpPartData.footprint, "%*[^0-9]%02d%02d", &i_length, &i_width) == 2) &&
+            i_length >= 1 && i_length <= 25 && i_width >= 1 && i_width <= 12) {
+
+            /* Standard SMD packages (0603, 0805, etc) */
             pnpPartData.length = 0.01 * i_length;
             pnpPartData.width  = 0.01 * i_width;
             pnpPartData.shape  = PART_SHAPE_RECTANGLE;
+
+        } else if (strstr(pnpPartData.footprint, "mil") && 
+                  sscanf(pnpPartData.footprint, "%d mil", &i_length) == 1) {
+
+            /* Mil-based package dimensions */
+            pnpPartData.length = i_length / 1000.0;
+            pnpPartData.width = 0.1; /* Default 100 mil width */
+            pnpPartData.shape = PART_SHAPE_RECTANGLE;
+
         } else {
-            if ((fabs(tmp_y) > fabs(tmp_x / 100)) && (fabs(tmp_x) > fabs(tmp_y / 100))) {
-                pnpPartData.length = 2 * fabs(tmp_x); /* get dimensions*/
-                pnpPartData.width  = 2 * fabs(tmp_y);
-                pnpPartData.shape  = PART_SHAPE_STD;
-            } else {
-                pnpPartData.length = 0.015;
-                pnpPartData.width  = 0.015;
-                pnpPartData.shape  = PART_SHAPE_UNKNOWN;
-            }
+            /* Default dimensions for unknown packages */
+            pnpPartData.length = 0.1;  /* 100 mil square */
+            pnpPartData.width = 0.1;   /* 100 mil square */
+            pnpPartData.shape = PART_SHAPE_STD;
         }
+
+        /* Add the part data to our array */
         g_array_append_val(pnpParseDataArray, pnpPartData);
         parsedLines += 1;
     }
-    gerb_transf_free(tr_rot);
-    /* fd->ptr=0; */
-    /* rewind(fd->fd); */
 
-    /* so a sanity check and see if this is a valid pnp file */
-    if ((((float)parsedLines / (float)lineCounter) < 0.3) || (!foundValidDataRow)) {
-        /* this doesn't look like a valid PNP file, so return error */
+    gerb_transf_free(tr_rot);
+
+    /* Check if we parsed enough valid rows to consider this a PnP file */
+    printf("Debug: Parsed %d lines out of %d total (%.1f%%)\n", 
+           parsedLines, lineCounter, 100.0f * (float)parsedLines / (float)lineCounter);
+
+    /* Consider the file valid if we found a valid header row OR have at least 3 parsed lines */
+    if ((!foundValidDataRow && parsedLines < 3) || parsedLines == 0) {
+        printf("Debug: Not enough valid data found (parsed %d of %d lines)\n", 
+               parsedLines, lineCounter);
         g_array_free(pnpParseDataArray, TRUE);
         return NULL;
     }
+
     return pnpParseDataArray;
-} /* pick_and_place_parse_file */
+}
+
+gboolean
+pnp_check_and_parse_header(
+    char* buf, int lineCounter, char* buf0, int* designator_col, int* footprint_col, 
+    int* mid_x_col, int* mid_y_col, int* ref_x_col, int* ref_y_col, 
+    int* pad_x_col, int* pad_y_col, int* layer_col, int* rotation_col, 
+    int* comment_col, char* delimiter, gboolean* foundValidDataRow
+) {
+    /* Only check first 20 lines and stop if we've already found a header */
+    if (lineCounter > 20 || *foundValidDataRow) {
+        return FALSE;
+    }
+
+    /* Make a copy of the original buffer for parsing */
+    char header_copy[MAXL + 2];
+    strncpy(header_copy, buf, MAXL);
+    header_copy[MAXL] = '\0';
+
+    /* Skip comment characters at the beginning if present */
+    char *header_start = header_copy;
+    if (header_start[0] == '#' || header_start[0] == '*') {
+        header_start++;
+        /* Skip any whitespace after the comment character */
+        while (*header_start && isspace(*header_start)) header_start++;
+    }
+
+    /* Check if this looks like a header line */
+    if (*header_start) {
+
+        printf("Debug: Check potential header row: %s\n", header_start);
+
+        /* Clear temporary buffer */
+        memset(buf0, 0, MAXL + 2);
+
+        /* Auto-detect delimiter if not already set */
+        if (*delimiter == '\0') {
+            if (strstr(header_start, ",")) *delimiter = ',';
+            else if (strstr(header_start, ";")) *delimiter = ';';
+            else if (strstr(header_start, "|")) *delimiter = '|';
+            else if (strstr(header_start, "\t")) *delimiter = '\t';
+            else *delimiter = ','; /* Default to comma */
+
+            printf("Debug: Auto-detected delimiter: '%c'\n", *delimiter);
+        }
+
+        /* Try to parse the header */
+        if (pnp_parse_header_line(header_start, buf0, designator_col, footprint_col, 
+                                mid_x_col, mid_y_col, ref_x_col, ref_y_col, 
+                                pad_x_col, pad_y_col, layer_col, rotation_col, 
+                                comment_col, delimiter)) {
+            printf("Debug: Valid header row confirmed\n");
+            *foundValidDataRow = TRUE;
+            return TRUE;
+        } else {
+            printf("Debug: Not enough column names found, skipping as header\n");
+        }
+    }
+
+    return FALSE;
+}
 
 /*	------------------------------------------------------------------
  *	pick_and_place_check_file_type
@@ -644,7 +867,7 @@ pick_and_place_convert_pnp_data_to_image(GArray* parsedPickAndPlaceData, gint bo
 
             curr_net = pnp_new_net(curr_net);
             pnp_init_net(curr_net, image, partData.designator, GERBV_APERTURE_STATE_ON, GERBV_INTERPOLATION_LINEARx1);
-
+            
             gerb_transf_apply(partData.length / 2, partData.width / 2, tr_rot, &curr_net->start_x, &curr_net->start_y);
             gerb_transf_apply(-partData.length / 2, partData.width / 2, tr_rot, &curr_net->stop_x, &curr_net->stop_y);
 
@@ -812,4 +1035,322 @@ pnp_init_net(
     if (strlen(label) > 0) {
         net->label = g_string_new(label);
     }
+}
+
+/**
+ * Parses a header line to identify column positions.
+ * Handles both standard headers and commented headers.
+ * 
+ * @param buf Input line buffer
+ * @param buf0 Temporary buffer
+ * @param designator_col Pointer to designator column index
+ * @param footprint_col Pointer to footprint column index
+ * @param mid_x_col Pointer to X coordinate column index
+ * @param mid_y_col Pointer to Y coordinate column index
+ * @param ref_x_col Pointer to reference X column index
+ * @param ref_y_col Pointer to reference Y column index
+ * @param pad_x_col Pointer to pad X column index
+ * @param pad_y_col Pointer to pad Y column index
+ * @param layer_col Pointer to layer column index
+ * @param rotation_col Pointer to rotation column index
+ * @param comment_col Pointer to comment column index
+ * @param delimiter Pointer to delimiter character
+ * 
+ * @return TRUE if header was successfully parsed, FALSE otherwise
+ */
+/** 
+ * Custom function to parse a header line that is comma-delimited.
+ * We need this because the csv_row_parse function has issues with our header format.
+ * This function handles leading/trailing whitespace and returns an array of field pointers.
+ */
+static int 
+custom_parse_comma_header(char* input, char* result_buffer, char* fields[], int max_fields) {
+    char* src = input;
+    char* dest = result_buffer;
+    int field_count = 0;
+    gboolean in_quote = FALSE;
+    
+    /* Skip leading whitespace */
+    while (*src && isspace(*src)) src++;
+    
+    /* Set the first field */
+    fields[field_count++] = dest;
+    
+    /* Process each character */
+    while (*src && field_count < max_fields) {
+        if (*src == '"') {
+            /* Handle quotes - toggle quote state but don't include them in output */
+            in_quote = !in_quote;
+            src++;  /* Skip the quote character */
+        } else if (*src == ',' && !in_quote) {
+            /* End of field (only if not inside quotes) */
+            *dest++ = '\0';  /* Terminate the current field */
+            
+            /* Skip the delimiter and any whitespace after it */
+            src++;
+            while (*src && isspace(*src) && *src != '"') src++;
+            
+            /* Start a new field if we haven't reached the max */
+            if (field_count < max_fields) {
+                fields[field_count++] = dest;
+            }
+        } else {
+            /* Copy the character */
+            *dest++ = *src++;
+        }
+    }
+    
+    /* Terminate the last field */
+    *dest = '\0';
+    
+    /* Trim trailing whitespace from all fields */
+    for (int i = 0; i < field_count; i++) {
+        int len = strlen(fields[i]);
+        while (len > 0 && isspace(fields[i][len-1])) {
+            fields[i][--len] = '\0';
+        }
+    }
+    
+    printf("Debug: Custom parser found %d fields\n", field_count);
+    
+    return field_count;
+}
+
+static gboolean
+pnp_parse_header_line(
+    char* buf, char* buf0, int* designator_col, int* footprint_col, int* mid_x_col, int* mid_y_col,
+    int* ref_x_col, int* ref_y_col, int* pad_x_col, int* pad_y_col, int* layer_col, int* rotation_col,
+    int* comment_col, char* delimiter
+) {
+    char header_buf[MAXL + 2];
+    char* start = buf;
+    int header_ret = 0;
+    char* header_row[12] = {NULL}; /* Initialize all pointers to NULL */
+    
+    /* Initialize header buffer with zeros to ensure clean parsing */
+    memset(header_buf, 0, MAXL + 2);
+    memset(buf0, 0, MAXL + 2);
+    
+    /* Handle commented headers - skip # and any whitespace */
+    if (buf[0] == '#') {
+        start = buf + 1;
+        while (*start && isspace(*start)) start++;
+    }
+    
+    /* For safety, limit copying to visible ASCII characters only */
+    int i = 0, j = 0;
+    while (start[i] && j < MAXL - 1) {
+        /* Skip control characters and extended ASCII */
+        if (start[i] >= 32 && start[i] <= 126) {
+            header_buf[j++] = start[i];
+        }
+        i++;
+    }
+    header_buf[j] = '\0'; /* Ensure null termination */
+    
+    /* Check if the buffer is empty after sanitization */
+    if (header_buf[0] == '\0') {
+        printf("Debug: Header line is empty after sanitization\n");
+        return FALSE;
+    }
+    
+    /* Use comma as default delimiter but check for others */
+    if (*delimiter == '\0') {
+        /* Count delimiters */
+        int comma_count = 0, tab_count = 0, semicolon_count = 0, pipe_count = 0;
+        
+        for (i = 0; header_buf[i]; i++) {
+            if (header_buf[i] == ',') comma_count++;
+            if (header_buf[i] == '\t') tab_count++;
+            if (header_buf[i] == ';') semicolon_count++;
+            if (header_buf[i] == '|') pipe_count++;
+        }
+        
+        printf("Debug: Found delimiters in header - commas: %d, tabs: %d, semicolons: %d, pipes: %d\n",
+               comma_count, tab_count, semicolon_count, pipe_count);
+        
+        /* Choose the most frequent delimiter */
+        *delimiter = ',';  /* Default to comma */
+        int max_count = comma_count;
+        
+        if (tab_count > max_count) {
+            max_count = tab_count;
+            *delimiter = '\t';
+        }
+        if (semicolon_count > max_count) {
+            max_count = semicolon_count;
+            *delimiter = ';';
+        }
+        if (pipe_count > max_count) {
+            *delimiter = '|';
+        }
+        
+        printf("Debug: Selected delimiter: '%c'\n", *delimiter);
+    }
+    
+    /* For comma delimiter, use our custom parser */
+    if (*delimiter == ',') {
+        printf("Debug: Using custom parser for comma-delimited header: '%s'\n", header_buf);
+        header_ret = custom_parse_comma_header(header_buf, buf0, header_row, 11);
+    } else {
+        /* For other delimiters, try the standard parser but with safety checks */
+        printf("Debug: Using standard parser with delimiter '%c' for: '%s'\n", *delimiter, header_buf);
+        header_ret = csv_row_parse(header_buf, strlen(header_buf), buf0, MAXL, header_row, 11, (int)*delimiter, CSV_QUOTES);
+        
+        /* Handle error from csv_row_parse */
+        if (header_ret <= 0) {
+            printf("Debug: Standard parser failed, trying custom comma parser as fallback\n");
+            header_ret = custom_parse_comma_header(header_buf, buf0, header_row, 11);
+        }
+    }
+    
+    /* Print all returned fields for debug */
+    printf("Debug: Header parse returned %d fields\n", header_ret);
+    for (i = 0; i < header_ret && i < 11; i++) {
+        if (header_row[i] != NULL) {
+            printf("Debug: Field[%d] = '%s'\n", i, header_row[i]);
+        } else {
+            printf("Debug: Field[%d] = NULL\n", i);
+        }
+    }
+    
+    /* Verify this is actually a header row by counting known column names */
+    int known_column_count = 0;
+    
+    if (header_ret <= 0) {
+        return FALSE;
+    }
+    
+    /* Try to identify column positions */
+    for (i = 0; i < header_ret && i < 11; i++) {
+        if (header_row[i] == NULL || header_row[i][0] == '\0') {
+            printf("Debug: Header[%d] is empty or NULL\n", i);
+            continue;
+        }
+        
+        printf("Debug: Processing header[%d] = '%s'\n", i, header_row[i]);
+        
+        /* Convert to lowercase for case-insensitive matching */
+        char temp_buf[50];
+        if (strlen(header_row[i]) >= sizeof(temp_buf)) {
+            /* Too long, only copy what we can fit */
+            strncpy(temp_buf, header_row[i], sizeof(temp_buf)-1);
+            temp_buf[sizeof(temp_buf)-1] = '\0';
+        } else {
+            strcpy(temp_buf, header_row[i]);
+        }
+        
+        /* Trim leading whitespace */
+        char* p = temp_buf;
+        while (*p && isspace(*p)) p++;
+        
+        /* If necessary, shift the string left */
+        if (p > temp_buf) {
+            memmove(temp_buf, p, strlen(p) + 1);
+        }
+        
+        /* Convert to lowercase */
+        for (p = temp_buf; *p; ++p) *p = tolower(*p);
+        
+        /* Check for known column names - being more strict now */
+        if ((strcmp(temp_buf, "refdes") == 0) || 
+            (strcmp(temp_buf, "ref") == 0) || 
+            (strncmp(temp_buf, "des", 3) == 0 && !strstr(temp_buf, "description"))) {
+            *designator_col = i;
+            printf("Debug: Found designator column at index %d\n", i);
+            known_column_count++;
+        } else if (strcmp(temp_buf, "description") == 0) {
+            /* 'Description' is NOT a designator column */
+            printf("Debug: Found description column at index %d\n", i);
+        } else if (strstr(temp_buf, "foot") || strstr(temp_buf, "pack") || 
+                  (strcmp(temp_buf, "value") == 0)) {  /* Value often contains footprint info */
+            *footprint_col = i;
+            printf("Debug: Found footprint/value column at index %d\n", i);
+            known_column_count++;
+        } else if ((strstr(temp_buf, "mid") && strstr(temp_buf, "x")) || 
+                   strcmp(temp_buf, "x") == 0) {
+            *mid_x_col = i;
+            printf("Debug: Found mid_x column at index %d\n", i);
+            known_column_count++;
+        } else if ((strstr(temp_buf, "mid") && strstr(temp_buf, "y")) || 
+                   strcmp(temp_buf, "y") == 0) {
+            *mid_y_col = i;
+            printf("Debug: Found mid_y column at index %d\n", i);
+            known_column_count++;
+        } else if (strstr(temp_buf, "rot")) {
+            *rotation_col = i;
+            printf("Debug: Found rotation column at index %d\n", i);
+            known_column_count++;
+        } else if (strstr(temp_buf, "layer") || strstr(temp_buf, "side") || 
+                  strstr(temp_buf, "top") || strstr(temp_buf, "bottom") ||
+                  strstr(temp_buf, "top/bottom")) {
+            *layer_col = i;
+            printf("Debug: Found layer column at index %d\n", i);
+            known_column_count++;
+        } else if (strstr(temp_buf, "comm") || strstr(temp_buf, "val")) {
+            *comment_col = i;
+            printf("Debug: Found comment column at index %d\n", i);
+            known_column_count++;
+        }
+    }
+    
+    printf("Debug: Found %d known column names\n", known_column_count);
+    
+    /* Special case for PCB XY format with specific header format */
+    if (strstr(buf, "RefDes") && strstr(buf, "X") && strstr(buf, "Y") && 
+        strstr(buf, "rotation") && known_column_count < 3) {
+        
+        printf("Debug: Recognized PCB XY format header despite low column count\n");
+        
+        /* Set columns based on pattern matching in the header */
+        for (i = 0; i < header_ret; i++) {
+            if (header_row[i] == NULL) continue;
+            
+            if (strstr(header_row[i], "RefDes"))
+                *designator_col = i;
+            else if (strstr(header_row[i], "Value"))
+                *footprint_col = i;
+            else if (strcmp(header_row[i], "X") == 0 || strcmp(header_row[i], " X") == 0)
+                *mid_x_col = i;
+            else if (strcmp(header_row[i], "Y") == 0 || strcmp(header_row[i], " Y") == 0)
+                *mid_y_col = i;
+            else if (strstr(header_row[i], "rotation"))
+                *rotation_col = i;
+            else if (strstr(header_row[i], "top") || strstr(header_row[i], "bottom"))
+                *layer_col = i;
+        }
+        
+        printf("Debug: Using PCB XY pattern-matched column map: RefDes=%d Value=%d X=%d Y=%d Rot=%d Layer=%d\n",
+               *designator_col, *footprint_col, *mid_x_col, *mid_y_col, *rotation_col, *layer_col);
+               
+        return TRUE;
+    }
+    
+    /* Use the specific PCB XY format pattern */
+    if (strstr(buf, "# RefDes") && 
+        (strstr(buf, ", Description") || strstr(buf, " Description")) && 
+        (strstr(buf, ", Value") || strstr(buf, " Value")) && 
+        ((strstr(buf, ", X") || strstr(buf, " X")) && 
+         (strstr(buf, ", Y") || strstr(buf, " Y"))) && 
+        (strstr(buf, ", rotation") || strstr(buf, " rotation")) && 
+        (strstr(buf, ", top/bottom") || strstr(buf, " top/bottom"))) {
+        
+        printf("Debug: Matched exact PCB XY header format\n");
+        
+        /* Set columns to standard PCB XY format */
+        *designator_col = 0;
+        *footprint_col = 2;  /* Value column typically used for footprint */
+        *mid_x_col = 3;
+        *mid_y_col = 4;
+        *rotation_col = 5;
+        *layer_col = 6;
+        
+        printf("Debug: Using standard PCB XY column map: RefDes=%d Value=%d X=%d Y=%d Rot=%d Layer=%d\n",
+               *designator_col, *footprint_col, *mid_x_col, *mid_y_col, *rotation_col, *layer_col);
+        
+        return TRUE;
+    }
+    
+    /* Only consider it a valid header if we found at least 3 known column names */
+    return (known_column_count >= 3);
 }

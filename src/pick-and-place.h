@@ -67,4 +67,10 @@ void pick_and_place_parse_file_to_images(gerb_file_t* fd, gerbv_image_t** topIma
 
 gboolean pick_and_place_check_file_type(gerb_file_t* fd, gboolean* returnFoundBinary);
 
+gboolean pnp_check_and_parse_header(
+    char* buf, int lineCounter, char* buf0, int* designator_col, int* footprint_col, 
+    int* mid_x_col, int* mid_y_col, int* ref_x_col, int* ref_y_col, 
+    int* pad_x_col, int* pad_y_col, int* layer_col, int* rotation_col, 
+    int* comment_col, char* delimiter, gboolean* foundValidDataRow);
+
 #endif /* GERBV_LAYERTYPE_PICKANDPLACE_H */
