@@ -1,0 +1,29 @@
+# Pick And Place List
+# eMail=
+#
+# Project=pnp_test
+# Date=17:31:18
+# CreatedBy=Fritzing 1.0.5.2025-03-06.1.0.4rc1-136-gac03c8955
+#
+# Coordinates in mils, always center of component
+# Origin 0/0=Lower left corner of PCB. Rotation in degree (0-360, math. pos.)
+RefDes,Description,Package,X,Y,Rotation,Side,Mount
+Description: resistance;capacitance;inductance;voltage;current;power;mpn;mn;
+C4,";100nF;;35V;;;;;","1206 [SMD, multilayer]",2278.72,793.72,0,Bottom,SMT
+R5,"220;;;;;0.25W;;;","2512 [SMD]",2440.19,1376.94,45,Top,SMT
+R7,"220;;;;;0.25W;;;","2512 [SMD]",522.676,1354.11,30,Top,SMT
+C2,";100nF;;35V;;;;;","200 mil [THT, multilayer]",2318.33,998.995,0,Bottom,THT
+R3,"220;;;;;0.25W;;;","THT",1568.14,1704.5,0,Top,THT
+U5,";;;;;;;;","DIP8 [THT]",888.144,716.841,30,Top,THT
+U1,";;;;;;;;","DIP8 [THT]",1668.14,748.995,0,Top,THT
+R6,"220;;;;;0.25W;;;","THT",718.144,1699,30,Top,THT
+C3,";100nF;;35V;;;;;","0603 [SMD, multilayer]",2242.91,909.468,0,Bottom,SMT
+Pad1,";;;;;;;;","",3141.71,1927.9,0,Bottom,MANUAL
+C1,";100nF;;35V;;;;;","100 mil [THT, multilayer]",2267.96,1099,0,Bottom,THT
+U4,";;;;;;;;","SO8 [SMD]",2421.85,266.41,45,Top,SMT
+Via1,";;;;;;;;","",1206.92,1081.93,0,Bottom,MANUAL
+R1,"220;;;;;0.25W;;;","2512 [SMD]",1607.91,1299,0,Top,SMT
+U6,";;;;;;;;","SO8 [SMD]",602.57,270.881,30,Top,SMT
+U2,";;;;;;;;","SO8 [SMD]",1643.81,219.995,0,Top,SMT
+U3,";;;;;;;;","DIP8 [THT]",2788.85,657.574,45,Top,THT
+R4,"220;;;;;0.25W;;;","THT",2645.26,1679.66,45,Top,THT
