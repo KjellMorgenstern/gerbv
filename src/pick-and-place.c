@@ -520,18 +520,71 @@ pick_and_place_parse_file(gerb_file_t* fd) {
         }
 
         /* Parse footprint shape */
-        if (strstr(pnpPartData.footprint, "SMD") != NULL &&
-            (sscanf(pnpPartData.footprint, "%02d%02d", &i_length, &i_width) == 2 ||
-             sscanf(pnpPartData.footprint, "%*[^0-9]%02d%02d", &i_length, &i_width) == 2) &&
-            i_length >= 1 && i_length <= 25 && i_width >= 1 && i_width <= 12) {
-
-            /* Standard SMD packages (0603, 0805, etc) */
-            pnpPartData.length = 0.01 * i_length;
-            pnpPartData.width  = 0.01 * i_width;
-            pnpPartData.shape  = PART_SHAPE_RECTANGLE;
-
-        } else if (strstr(pnpPartData.footprint, "mil") && 
-                  sscanf(pnpPartData.footprint, "%d mil", &i_length) == 1) {
+        char* footprint_to_check = pnpPartData.footprint;
+        int found_smd_pattern = 0;
+        
+        /* First check if we have a valid footprint from a properly identified footprint column */
+        if (footprint_col >= 0 && 
+            footprint_to_check != NULL && 
+            strlen(footprint_to_check) > 0 && 
+            strcmp(footprint_to_check, "(unknown)") != 0) {
+            
+            /* This comes from a column explicitly identified as 'footprint' or 'package' */
+            printf("Debug: Using explicit footprint column: '%s'\n", footprint_to_check);
+            
+            /* Check if the footprint contains package dimensions */
+            int direct_scan = sscanf(footprint_to_check, "%02d%02d", &i_length, &i_width);
+            int prefix_scan = sscanf(footprint_to_check, "%*[^0-9]%02d%02d", &i_length, &i_width);
+            
+            printf("Debug: Footprint scan results - direct: %d, with prefix: %d\n", direct_scan, prefix_scan);
+            
+            if ((direct_scan == 2 || prefix_scan == 2) &&
+                i_length >= 1 && i_length <= 25 && i_width >= 1 && i_width <= 12) {
+                found_smd_pattern = 1;
+                printf("Debug: Found valid SMD dimensions in footprint column\n");
+            }
+        }
+        /* If no valid footprint pattern found, check comment/description column, but require "SMD" substring */
+        else if (comment_col < ret && row[comment_col] != NULL && strstr(row[comment_col], "SMD")) {
+            printf("Debug: Using comment/description column (index %d) for SMD footprint: '%s'\n", 
+                   comment_col, row[comment_col]);
+            footprint_to_check = row[comment_col];
+            found_smd_pattern = 1;
+        } else {
+            printf("Debug: No valid footprint information found or field not identified as footprint\n");
+        }
+        
+        printf("Debug: Analyzing final footprint: '%s'\n", footprint_to_check);
+        
+        /* Only proceed if we found a SMD pattern */
+        if (found_smd_pattern) {
+            /* If using description column, need to do dimension scanning again */
+            if (footprint_to_check != pnpPartData.footprint) {
+                int direct_scan = sscanf(footprint_to_check, "%02d%02d", &i_length, &i_width);
+                int prefix_scan = sscanf(footprint_to_check, "%*[^0-9]%02d%02d", &i_length, &i_width);
+                
+                printf("Debug: Description scan results - direct: %d, with prefix: %d\n", direct_scan, prefix_scan);
+                
+                /* If scanning failed, don't treat as SMD */
+                if (!((direct_scan == 2 || prefix_scan == 2) &&
+                     i_length >= 1 && i_length <= 25 && i_width >= 1 && i_width <= 12)) {
+                    found_smd_pattern = 0;
+                }
+            }
+            
+            if (found_smd_pattern) {
+                
+                /* Standard SMD packages (0603, 0805, etc) */
+                printf("Debug: Detected SMD package: %02d%02d\n", i_length, i_width);
+                pnpPartData.length = 0.01 * i_length;
+                pnpPartData.width  = 0.01 * i_width;
+                pnpPartData.shape  = PART_SHAPE_RECTANGLE;
+            }
+        }
+        
+        /* Handle mil-based footprints */
+        else if (strstr(pnpPartData.footprint, "mil") && 
+                sscanf(pnpPartData.footprint, "%d mil", &i_length) == 1) {
 
             /* Mil-based package dimensions */
             pnpPartData.length = i_length / 1000.0;
@@ -1260,13 +1313,19 @@ pnp_parse_header_line(
             printf("Debug: Found designator column at index %d\n", i);
             known_column_count++;
         } else if (strcmp(temp_buf, "description") == 0) {
-            /* 'Description' is NOT a designator column */
-            printf("Debug: Found description column at index %d\n", i);
-        } else if (strstr(temp_buf, "foot") || strstr(temp_buf, "pack") || 
-                  (strcmp(temp_buf, "value") == 0)) {  /* Value often contains footprint info */
-            *footprint_col = i;
-            printf("Debug: Found footprint/value column at index %d\n", i);
+            /* Map 'Description' to the comment field */
+            *comment_col = i;
+            printf("Debug: Found description column at index %d (mapping to comment)\n", i);
             known_column_count++;
+        } else if (strstr(temp_buf, "foot") || strstr(temp_buf, "pack")) {
+            /* Only use foot(print) or pack(age) fields as footprint */
+            *footprint_col = i;
+            printf("Debug: Found footprint/package column at index %d\n", i);
+            known_column_count++;
+        } else if (strcmp(temp_buf, "value") == 0) {
+            /* Sometimes Value contains the part value, not footprint info */
+            /* Do NOT treat value as footprint by default */
+            printf("Debug: Found value column at index %d (not using as footprint by default)\n", i);
         } else if ((strstr(temp_buf, "mid") && strstr(temp_buf, "x")) || 
                    strcmp(temp_buf, "x") == 0) {
             *mid_x_col = i;
@@ -1308,7 +1367,7 @@ pnp_parse_header_line(
             
             if (strstr(header_row[i], "RefDes"))
                 *designator_col = i;
-            else if (strstr(header_row[i], "Value"))
+            else if (strstr(header_row[i], "Footprint") || strstr(header_row[i], "Package"))
                 *footprint_col = i;
             else if (strcmp(header_row[i], "X") == 0 || strcmp(header_row[i], " X") == 0)
                 *mid_x_col = i;

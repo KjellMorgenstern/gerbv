@@ -1,3 +1,9 @@
+2025-03-20   Kjell Morgenstern * kjell AT fritzing dot org * (with assistance from Claude Code)
+
+	* src/pick-and-place.c: Improve PnP file parsing with better header 
+	detection and SMD package size handling. Add proper column type detection
+	for footprint and description fields. Add quote removal helper.
+
 2025-03-20   Kjell Morgenstern * kjell AT fritzing dot org 
 	* src/pick-and-place.c: Fix distorted PART_SHAPE_STD components by 
 	calculating dimensions earlier in the process and applying rotation
