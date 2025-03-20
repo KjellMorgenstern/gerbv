@@ -593,8 +593,8 @@ pick_and_place_parse_file(gerb_file_t* fd) {
 
         } else {
             /* Default dimensions for unknown packages */
-            pnpPartData.length = 0.1;  /* 100 mil square */
-            pnpPartData.width = 0.1;   /* 100 mil square */
+            pnpPartData.length = 0.06;  /* 60 mil square */
+            pnpPartData.width = 0.06;   /* 60 mil square */
             pnpPartData.shape = PART_SHAPE_STD;
         }
 
