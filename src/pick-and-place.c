@@ -330,6 +330,11 @@ pick_and_place_parse_file(gerb_file_t* fd) {
                     return NULL;
                 }
             }
+            gerb_transf_reset(tr_rot);
+            gerb_transf_rotate(tr_rot, -DEG2RAD(pnpPartData.rotation)); /* rotate it back to get dimensions */
+            gerb_transf_apply(
+                pnpPartData.pad_x - pnpPartData.mid_x, pnpPartData.pad_y - pnpPartData.mid_y, tr_rot, &tmp_x, &tmp_y
+            );
         }
         /* for now, default back to PCB program format
          * TODO: implement better checking for format
@@ -342,6 +347,8 @@ pick_and_place_parse_file(gerb_file_t* fd) {
             pnpPartData.mid_y = pick_and_place_get_float_unit(row[4], def_unit);
             pnpPartData.pad_x = pnpPartData.mid_x + 0.03;
             pnpPartData.pad_y = pnpPartData.mid_y + 0.03;
+            tmp_x = 0.03;
+            tmp_y = 0.03;
 
             /* check for coordinate sanity, and abort if it fails
              * Note: this is mainly to catch comment lines that get parsed
@@ -371,11 +378,6 @@ pick_and_place_parse_file(gerb_file_t* fd) {
             pnpPartData.width  = 0.01 * i_width;
             pnpPartData.shape  = PART_SHAPE_RECTANGLE;
         } else {
-            gerb_transf_reset(tr_rot);
-            gerb_transf_rotate(tr_rot, -DEG2RAD(pnpPartData.rotation)); /* rotate it back to get dimensions */
-            gerb_transf_apply(
-                pnpPartData.pad_x - pnpPartData.mid_x, pnpPartData.pad_y - pnpPartData.mid_y, tr_rot, &tmp_x, &tmp_y
-            );
             if ((fabs(tmp_y) > fabs(tmp_x / 100)) && (fabs(tmp_x) > fabs(tmp_y / 100))) {
                 pnpPartData.length = 2 * fabs(tmp_x); /* get dimensions*/
                 pnpPartData.width  = 2 * fabs(tmp_y);
